@@ -1,153 +1,188 @@
-<#
-.SYNOPSIS
-    Installs Maintenance Logger
-
-.DESCRIPTION
-    Performs the following:
-        • Verifies Administrator privileges
-        • Creates installation directory
-        • Copies MaintenanceLogger.ps1
-        • Creates Event Source
-        • Creates Public Desktop shortcut
-        • Optionally copies icon
-#>
+# MaintenanceLogger.ps1
 
 $ErrorActionPreference = "Stop"
 
-$InstallFolder = "C:\Program Files\Maintenance Logger"
+$EventLogName = "Application"
+$EventSource  = "MaintenanceLogger"
 
-$ScriptName = "MaintenanceLogger.ps1"
-$IconName = "MaintenanceLogger.ico"
-
-$EventLog = "Application"
-$EventSource = "MaintenanceLogger"
-
-Write-Host ""
-Write-Host "======================================="
-Write-Host " Maintenance Logger Installer"
-Write-Host "======================================="
-Write-Host ""
-
-# Verify Administrator
-
-$Identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-$Principal = New-Object Security.Principal.WindowsPrincipal($Identity)
-
-if (-not $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))
-{
-    Write-Host ""
-    Write-Host "ERROR: Installer must be run as Administrator."
-    Write-Host ""
-
-    Pause
-    exit 1
-}
-
-Write-Host "Running as Administrator..."
-
-# Create Installation Folder
-
-if (!(Test-Path $InstallFolder))
-{
-    Write-Host "Creating installation folder..."
-
-    New-Item `
-        -ItemType Directory `
-        -Path $InstallFolder | Out-Null
-}
-
-# Copy PowerShell Script
-
-$SourceScript = Join-Path $PSScriptRoot $ScriptName
-
-if (!(Test-Path $SourceScript))
-{
-    Write-Host ""
-    Write-Host "$ScriptName not found."
-    Write-Host "Place this installer beside the script."
-    Pause
-    exit 1
-}
-
-Copy-Item `
-    $SourceScript `
-    "$InstallFolder\$ScriptName" `
-    -Force
-
-Write-Host "Copied MaintenanceLogger.ps1"
-
-# Copy Icon (optional)
-
-$SourceIcon = Join-Path $PSScriptRoot $IconName
-
-if (Test-Path $SourceIcon)
-{
-    Copy-Item `
-        $SourceIcon `
-        "$InstallFolder\$IconName" `
-        -Force
-
-    Write-Host "Copied icon."
-}
-
-# Create Event Source
-
-if (-not [System.Diagnostics.EventLog]::SourceExists($EventSource))
-{
-    Write-Host "Creating Windows Event Source..."
-
-    New-EventLog `
-        -LogName $EventLog `
-        -Source $EventSource
-
-    Write-Host "Event Source created."
-}
-else
-{
-    Write-Host "Event Source already exists."
-}
-
-# Create Desktop Shortcut
-
-Write-Host "Creating Desktop Shortcut..."
-
-$Shell = New-Object -ComObject WScript.Shell
-
-$Shortcut = $Shell.CreateShortcut(
-    "C:\Users\Public\Desktop\Maintenance Logger.lnk"
+$Categories = @(
+    "Data Transfer",
+    "User Account Creation",
+    "User Account Modification",
+    "New VM",
+    "Hardware Install",
+    "Software Install",
+    "Patching",
+    "System Reboot",
+    "Other"
 )
 
-$Shortcut.TargetPath = "powershell.exe"
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
 
-$Shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$InstallFolder\$ScriptName`""
+public class LogonUtil {
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool LogonUser(
+        string lpszUsername,
+        string lpszDomain,
+        string lpszPassword,
+        int dwLogonType,
+        int dwLogonProvider,
+        out IntPtr phToken
+    );
 
-$Shortcut.WorkingDirectory = $InstallFolder
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool CloseHandle(IntPtr hObject);
+}
+"@
 
-if (Test-Path "$InstallFolder\$IconName")
-{
-    $Shortcut.IconLocation = "$InstallFolder\$IconName"
+$LoggedInUser = "$env:USERDOMAIN\$env:USERNAME"
+$Computer = $env:COMPUTERNAME
+
+$PerformedByInput = Read-Host "Who performed the action? Press Enter for logged in user [$LoggedInUser]"
+
+if ([string]::IsNullOrWhiteSpace($PerformedByInput)) {
+    $PerformedBy = $LoggedInUser
+}
+else {
+    $AttemptedUser = $PerformedByInput.Trim()
+
+    if ($AttemptedUser -match "\\") {
+        $Domain = $AttemptedUser.Split("\")[0]
+        $Username = $AttemptedUser.Split("\")[1]
+    }
+    else {
+        $Domain = $env:USERDOMAIN
+        $Username = $AttemptedUser
+    }
+
+    $SecurePassword = Read-Host "Enter password for $Domain\$Username" -AsSecureString
+    $Ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecurePassword)
+    $PlainPassword = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($Ptr)
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($Ptr)
+
+    $Token = [IntPtr]::Zero
+
+    $AuthSuccess = [LogonUtil]::LogonUser(
+        $Username,
+        $Domain,
+        $PlainPassword,
+        2,
+        0,
+        [ref]$Token
+    )
+
+    $PlainPassword = $null
+
+    if ($AuthSuccess) {
+        [LogonUtil]::CloseHandle($Token) | Out-Null
+        $PerformedBy = "$Domain\$Username"
+    }
+    else {
+        $FailureTime = Get-Date -Format "yyyy-MM-dd hh:mm tt"
+
+        $FailureMessage = @"
+Maintenance Logger Failed Authentication Attempt
+
+Logged In User: $LoggedInUser
+Computer: $Computer
+Attempted Performed By User: $Domain\$Username
+Failure Time: $FailureTime
+
+Result:
+Authentication failed. Maintenance entry was not accepted.
+"@
+
+        Write-EventLog `
+            -LogName $EventLogName `
+            -Source $EventSource `
+            -EventId 1001 `
+            -EntryType Warning `
+            -Message $FailureMessage
+
+        Write-Host ""
+        Write-Host "Authentication failed."
+        Write-Host "This failed attempt has been logged."
+        Start-Sleep -Seconds 3
+        exit
+    }
 }
 
-$Shortcut.Save()
+$DefaultEventTime = Get-Date
+$DefaultEventTimeText = $DefaultEventTime.ToString("hh:mm tt")
 
-Write-Host "Desktop shortcut created."
+do {
+    $EventTimeInput = Read-Host "Enter event time [hh:mm AM/PM] or press Enter for now [$DefaultEventTimeText]"
+
+    if ([string]::IsNullOrWhiteSpace($EventTimeInput)) {
+        $EventTime = $DefaultEventTime
+        $ValidTime = $true
+    }
+    else {
+        $Today = Get-Date -Format "yyyy-MM-dd"
+        $DateTimeString = "$Today $EventTimeInput"
+
+        $ValidTime = [datetime]::TryParseExact(
+            $DateTimeString,
+            "yyyy-MM-dd hh:mm tt",
+            $null,
+            [System.Globalization.DateTimeStyles]::None,
+            [ref]$EventTime
+        )
+
+        if (-not $ValidTime) {
+            Write-Host ""
+            Write-Host "Invalid format. Please enter time like:"
+            Write-Host "  08:30 AM"
+            Write-Host "  01:15 PM"
+            Write-Host ""
+        }
+    }
+} until ($ValidTime)
+
+$EventTimeText = $EventTime.ToString("yyyy-MM-dd hh:mm tt")
 
 Write-Host ""
-Write-Host "======================================="
-Write-Host " Installation Complete"
-Write-Host "======================================="
-Write-Host ""
+Write-Host "Select Maintenance Category:"
+for ($i = 0; $i -lt $Categories.Count; $i++) {
+    Write-Host "$($i + 1). $($Categories[$i])"
+}
 
-Write-Host "Installed to:"
-Write-Host "  $InstallFolder"
+do {
+    $Selection = Read-Host "Enter category number"
+} until ($Selection -as [int] -and $Selection -ge 1 -and $Selection -le $Categories.Count)
+
+$Category = $Categories[$Selection - 1]
+
+do {
+    $Entry = Read-Host "Enter maintenance description"
+
+    if ([string]::IsNullOrWhiteSpace($Entry)) {
+        Write-Host "Description cannot be blank."
+    }
+} until (-not [string]::IsNullOrWhiteSpace($Entry))
+
+$Message = @"
+Maintenance Work Logged
+
+Performed By: $PerformedBy
+Logged In User: $LoggedInUser
+Computer: $Computer
+Event Time: $EventTimeText
+Category: $Category
+
+Description:
+$Entry
+"@
+
+Write-EventLog `
+    -LogName $EventLogName `
+    -Source $EventSource `
+    -EventId 1000 `
+    -EntryType Information `
+    -Message $Message
 
 Write-Host ""
-Write-Host "Desktop Shortcut:"
-Write-Host "  C:\Users\Public\Desktop\Maintenance Logger.lnk"
-
-Write-Host ""
-Write-Host "Event Source:"
-Write-Host "  MaintenanceLogger"
-
-Write-Host ""
-Pause
+Write-Host "Maintenance entry logged successfully."
+Start-Sleep -Seconds 3
