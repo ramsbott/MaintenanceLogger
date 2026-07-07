@@ -1,9 +1,14 @@
-# MaintenanceLogger.ps1
-
+```powershell
+#Requires -Version 5.1
 $ErrorActionPreference = "Stop"
 
+# ── Event Log Setup ──────────────────────────────────────────────────────────
 $EventLogName = "Application"
 $EventSource  = "MaintenanceLogger"
+
+if (-not [System.Diagnostics.EventLog]::SourceExists($EventSource)) {
+    New-EventLog -LogName $EventLogName -Source $EventSource
+}
 
 $Categories = @(
     "Data Transfer",
@@ -16,172 +21,160 @@ $Categories = @(
     "Other"
 )
 
+# ── AD Auth Helper ────────────────────────────────────────────────────────────
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
-
 public class LogonUtil {
-    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
     public static extern bool LogonUser(
-        string lpszUsername,
-        string lpszDomain,
-        string lpszPassword,
-        int dwLogonType,
-        int dwLogonProvider,
-        out IntPtr phToken
-    );
-
-    [DllImport("kernel32.dll", SetLastError = true)]
+        string lpszUsername, string lpszDomain, string lpszPassword,
+        int dwLogonType, int dwLogonProvider, out IntPtr phToken);
+    [DllImport("kernel32.dll", SetLastError=true)]
     public static extern bool CloseHandle(IntPtr hObject);
 }
 "@
 
 $LoggedInUser = "$env:USERDOMAIN\$env:USERNAME"
-$Computer = $env:COMPUTERNAME
+$Computer     = $env:COMPUTERNAME
 
-$PerformedByInput = Read-Host "Who performed the action? Press Enter for logged in user [$LoggedInUser]"
+# ── Windows Forms GUI ─────────────────────────────────────────────────────────
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+[System.Windows.Forms.Application]::EnableVisualStyles()
 
-if ([string]::IsNullOrWhiteSpace($PerformedByInput)) {
-    $PerformedBy = $LoggedInUser
-}
-else {
-    $AttemptedUser = $PerformedByInput.Trim()
+$form                  = New-Object System.Windows.Forms.Form
+$form.Text             = "Maintenance Logger"
+$form.Size             = New-Object System.Drawing.Size(520, 560)
+$form.StartPosition    = "CenterScreen"
+$form.FormBorderStyle  = "FixedDialog"
+$form.MaximizeBox      = $false
+$form.BackColor        = [System.Drawing.Color]::FromArgb(245, 245, 247)
+$form.Font             = New-Object System.Drawing.Font("Segoe UI", 9)
 
-    if ($AttemptedUser -match "\\") {
-        $Domain = $AttemptedUser.Split("\")[0]
-        $Username = $AttemptedUser.Split("\")[1]
-    }
-    else {
-        $Domain = $env:USERDOMAIN
-        $Username = $AttemptedUser
-    }
-
-    $SecurePassword = Read-Host "Enter password for $Domain\$Username" -AsSecureString
-    $Ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecurePassword)
-    $PlainPassword = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($Ptr)
-    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($Ptr)
-
-    $Token = [IntPtr]::Zero
-
-    $AuthSuccess = [LogonUtil]::LogonUser(
-        $Username,
-        $Domain,
-        $PlainPassword,
-        2,
-        0,
-        [ref]$Token
-    )
-
-    $PlainPassword = $null
-
-    if ($AuthSuccess) {
-        [LogonUtil]::CloseHandle($Token) | Out-Null
-        $PerformedBy = "$Domain\$Username"
-    }
-    else {
-        $FailureTime = Get-Date -Format "yyyy-MM-dd hh:mm tt"
-
-        $FailureMessage = @"
-Maintenance Logger Failed Authentication Attempt
-
-Logged In User: $LoggedInUser
-Computer: $Computer
-Attempted Performed By User: $Domain\$Username
-Failure Time: $FailureTime
-
-Result:
-Authentication failed. Maintenance entry was not accepted.
-"@
-
-        Write-EventLog `
-            -LogName $EventLogName `
-            -Source $EventSource `
-            -EventId 1001 `
-            -EntryType Warning `
-            -Message $FailureMessage
-
-        Write-Host ""
-        Write-Host "Authentication failed."
-        Write-Host "This failed attempt has been logged."
-        Start-Sleep -Seconds 3
-        exit
-    }
+# ── Helper: label + control row ───────────────────────────────────────────────
+function Add-Row {
+    param($form, $labelText, $control, $y)
+    $lbl           = New-Object System.Windows.Forms.Label
+    $lbl.Text      = $labelText
+    $lbl.Location  = New-Object System.Drawing.Point(30, $y)
+    $lbl.Size      = New-Object System.Drawing.Size(140, 20)
+    $lbl.ForeColor = [System.Drawing.Color]::FromArgb(80, 80, 80)
+    $lbl.Font      = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+    $control.Location = New-Object System.Drawing.Point(30, ($y + 22))
+    $control.Size     = New-Object System.Drawing.Size(440, 28)
+    $form.Controls.Add($lbl)
+    $form.Controls.Add($control)
 }
 
-$DefaultEventTime = Get-Date
-$DefaultEventTimeText = $DefaultEventTime.ToString("hh:mm tt")
+# ── Title bar panel ───────────────────────────────────────────────────────────
+$titlePanel            = New-Object System.Windows.Forms.Panel
+$titlePanel.Dock       = "Top"
+$titlePanel.Height     = 60
+$titlePanel.BackColor  = [System.Drawing.Color]::FromArgb(30, 30, 30)
 
-do {
-    $EventTimeInput = Read-Host "Enter event time [hh:mm AM/PM] or press Enter for now [$DefaultEventTimeText]"
+$titleLabel            = New-Object System.Windows.Forms.Label
+$titleLabel.Text       = "  🔧  Maintenance Logger"
+$titleLabel.Dock       = "Fill"
+$titleLabel.ForeColor  = [System.Drawing.Color]::White
+$titleLabel.Font       = New-Object System.Drawing.Font("Segoe UI", 14, [System.Drawing.FontStyle]::Bold)
+$titleLabel.TextAlign  = "MiddleLeft"
+$titlePanel.Controls.Add($titleLabel)
+$form.Controls.Add($titlePanel)
 
-    if ([string]::IsNullOrWhiteSpace($EventTimeInput)) {
-        $EventTime = $DefaultEventTime
-        $ValidTime = $true
-    }
-    else {
-        $Today = Get-Date -Format "yyyy-MM-dd"
-        $DateTimeString = "$Today $EventTimeInput"
+# ── Performed By ──────────────────────────────────────────────────────────────
+$txtPerformedBy        = New-Object System.Windows.Forms.TextBox
+$txtPerformedBy.Text   = $LoggedInUser
+Add-Row $form "Performed By (DOMAIN\Username)" $txtPerformedBy 80
 
-        $ValidTime = [datetime]::TryParseExact(
-            $DateTimeString,
-            "yyyy-MM-dd hh:mm tt",
-            $null,
-            [System.Globalization.DateTimeStyles]::None,
-            [ref]$EventTime
-        )
+# ── Password (shown only when Performed By differs from logged-in user) ───────
+$lblPassword           = New-Object System.Windows.Forms.Label
+$lblPassword.Text      = "Password (required if different user)"
+$lblPassword.Location  = New-Object System.Drawing.Point(30, 152)
+$lblPassword.Size      = New-Object System.Drawing.Size(300, 20)
+$lblPassword.ForeColor = [System.Drawing.Color]::FromArgb(80, 80, 80)
+$lblPassword.Font      = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
 
-        if (-not $ValidTime) {
-            Write-Host ""
-            Write-Host "Invalid format. Please enter time like:"
-            Write-Host "  08:30 AM"
-            Write-Host "  01:15 PM"
-            Write-Host ""
-        }
-    }
-} until ($ValidTime)
+$txtPassword           = New-Object System.Windows.Forms.TextBox
+$txtPassword.Location  = New-Object System.Drawing.Point(30, 174)
+$txtPassword.Size      = New-Object System.Drawing.Size(440, 28)
+$txtPassword.PasswordChar = '*'
+$txtPassword.Enabled   = $false
 
-$EventTimeText = $EventTime.ToString("yyyy-MM-dd hh:mm tt")
+$form.Controls.Add($lblPassword)
+$form.Controls.Add($txtPassword)
 
-Write-Host ""
-Write-Host "Select Maintenance Category:"
-for ($i = 0; $i -lt $Categories.Count; $i++) {
-    Write-Host "$($i + 1). $($Categories[$i])"
-}
+# Enable/disable password field based on whether user changed the name
+$txtPerformedBy.Add_TextChanged({
+    $txtPassword.Enabled = ($txtPerformedBy.Text.Trim() -ne $LoggedInUser)
+})
 
-do {
-    $Selection = Read-Host "Enter category number"
-} until ($Selection -as [int] -and $Selection -ge 1 -and $Selection -le $Categories.Count)
+# ── Event Date & Time ─────────────────────────────────────────────────────────
+$lblDateTime           = New-Object System.Windows.Forms.Label
+$lblDateTime.Text      = "Event Date & Time"
+$lblDateTime.Location  = New-Object System.Drawing.Point(30, 218)
+$lblDateTime.Size      = New-Object System.Drawing.Size(200, 20)
+$lblDateTime.ForeColor = [System.Drawing.Color]::FromArgb(80, 80, 80)
+$lblDateTime.Font      = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
 
-$Category = $Categories[$Selection - 1]
+$dtPicker              = New-Object System.Windows.Forms.DateTimePicker
+$dtPicker.Location     = New-Object System.Drawing.Point(30, 240)
+$dtPicker.Size         = New-Object System.Drawing.Size(440, 28)
+$dtPicker.Format       = "Custom"
+$dtPicker.CustomFormat = "yyyy-MM-dd  hh:mm tt"
+$dtPicker.ShowUpDown   = $true
+$dtPicker.Value        = Get-Date
 
-do {
-    $Entry = Read-Host "Enter maintenance description"
+$form.Controls.Add($lblDateTime)
+$form.Controls.Add($dtPicker)
 
-    if ([string]::IsNullOrWhiteSpace($Entry)) {
-        Write-Host "Description cannot be blank."
-    }
-} until (-not [string]::IsNullOrWhiteSpace($Entry))
+# ── Category ──────────────────────────────────────────────────────────────────
+$cboCategory           = New-Object System.Windows.Forms.ComboBox
+$cboCategory.DropDownStyle = "DropDownList"
+$Categories | ForEach-Object { $cboCategory.Items.Add($_) | Out-Null }
+$cboCategory.SelectedIndex = 0
+Add-Row $form "Category" $cboCategory 290
 
-$Message = @"
-Maintenance Work Logged
+# ── Description ───────────────────────────────────────────────────────────────
+$lblDesc               = New-Object System.Windows.Forms.Label
+$lblDesc.Text          = "Description"
+$lblDesc.Location      = New-Object System.Drawing.Point(30, 362)
+$lblDesc.Size          = New-Object System.Drawing.Size(200, 20)
+$lblDesc.ForeColor     = [System.Drawing.Color]::FromArgb(80, 80, 80)
+$lblDesc.Font          = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
 
-Performed By: $PerformedBy
-Logged In User: $LoggedInUser
-Computer: $Computer
-Event Time: $EventTimeText
-Category: $Category
+$txtDesc               = New-Object System.Windows.Forms.TextBox
+$txtDesc.Location      = New-Object System.Drawing.Point(30, 384)
+$txtDesc.Size          = New-Object System.Drawing.Size(440, 80)
+$txtDesc.Multiline     = $true
+$txtDesc.ScrollBars    = "Vertical"
 
-Description:
-$Entry
-"@
+$form.Controls.Add($lblDesc)
+$form.Controls.Add($txtDesc)
 
-Write-EventLog `
-    -LogName $EventLogName `
-    -Source $EventSource `
-    -EventId 1000 `
-    -EntryType Information `
-    -Message $Message
+# ── Status label ──────────────────────────────────────────────────────────────
+$lblStatus             = New-Object System.Windows.Forms.Label
+$lblStatus.Location    = New-Object System.Drawing.Point(30, 478)
+$lblStatus.Size        = New-Object System.Drawing.Size(340, 20)
+$lblStatus.ForeColor   = [System.Drawing.Color]::FromArgb(120, 120, 120)
+$form.Controls.Add($lblStatus)
 
-Write-Host ""
-Write-Host "Maintenance entry logged successfully."
-Start-Sleep -Seconds 3
+# ── Submit Button ─────────────────────────────────────────────────────────────
+$btnSubmit             = New-Object System.Windows.Forms.Button
+$btnSubmit.Text        = "Log Entry"
+$btnSubmit.Location    = New-Object System.Drawing.Point(360, 472)
+$btnSubmit.Size        = New-Object System.Drawing.Size(110, 34)
+$btnSubmit.BackColor   = [System.Drawing.Color]::FromArgb(30, 30, 30)
+$btnSubmit.ForeColor   = [System.Drawing.Color]::White
+$btnSubmit.FlatStyle   = "Flat"
+$btnSubmit.Font        = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+$btnSubmit.Cursor      = [System.Windows.Forms.Cursors]::Hand
+
+$btnSubmit.Add_Click({
+    $lblStatus.ForeColor = [System.Drawing.Color]::FromArgb(120, 120, 120)
+    $lblStatus.Text = ""
+
+    $performedByRaw = $txtPerformedBy.Text.Trim()
+    $description    = $txtDesc.Text.Trim()
+
+    #
