@@ -1,180 +1,153 @@
-```powershell
-#Requires -Version 5.1
+<#
+.SYNOPSIS
+    Installs Maintenance Logger
+
+.DESCRIPTION
+    Performs the following:
+        • Verifies Administrator privileges
+        • Creates installation directory
+        • Copies MaintenanceLogger.ps1
+        • Creates Event Source
+        • Creates Public Desktop shortcut
+        • Optionally copies icon
+#>
+
 $ErrorActionPreference = "Stop"
 
-# ── Event Log Setup ──────────────────────────────────────────────────────────
-$EventLogName = "Application"
-$EventSource  = "MaintenanceLogger"
+$InstallFolder = "C:\Program Files\Maintenance Logger"
 
-if (-not [System.Diagnostics.EventLog]::SourceExists($EventSource)) {
-    New-EventLog -LogName $EventLogName -Source $EventSource
+$ScriptName = "MaintenanceLogger.ps1"
+$IconName = "MaintenanceLogger.ico"
+
+$EventLog = "Application"
+$EventSource = "MaintenanceLogger"
+
+Write-Host ""
+Write-Host "======================================="
+Write-Host " Maintenance Logger Installer"
+Write-Host "======================================="
+Write-Host ""
+
+# Verify Administrator
+
+$Identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$Principal = New-Object Security.Principal.WindowsPrincipal($Identity)
+
+if (-not $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))
+{
+    Write-Host ""
+    Write-Host "ERROR: Installer must be run as Administrator."
+    Write-Host ""
+
+    Pause
+    exit 1
 }
 
-$Categories = @(
-    "Data Transfer",
-    "User Account Creation",
-    "User Account Modification",
-    "Hardware Install",
-    "Software Install",
-    "Patching",
-    "System Reboot",
-    "Other"
+Write-Host "Running as Administrator..."
+
+# Create Installation Folder
+
+if (!(Test-Path $InstallFolder))
+{
+    Write-Host "Creating installation folder..."
+
+    New-Item `
+        -ItemType Directory `
+        -Path $InstallFolder | Out-Null
+}
+
+# Copy PowerShell Script
+
+$SourceScript = Join-Path $PSScriptRoot $ScriptName
+
+if (!(Test-Path $SourceScript))
+{
+    Write-Host ""
+    Write-Host "$ScriptName not found."
+    Write-Host "Place this installer beside the script."
+    Pause
+    exit 1
+}
+
+Copy-Item `
+    $SourceScript `
+    "$InstallFolder\$ScriptName" `
+    -Force
+
+Write-Host "Copied MaintenanceLogger.ps1"
+
+# Copy Icon (optional)
+
+$SourceIcon = Join-Path $PSScriptRoot $IconName
+
+if (Test-Path $SourceIcon)
+{
+    Copy-Item `
+        $SourceIcon `
+        "$InstallFolder\$IconName" `
+        -Force
+
+    Write-Host "Copied icon."
+}
+
+# Create Event Source
+
+if (-not [System.Diagnostics.EventLog]::SourceExists($EventSource))
+{
+    Write-Host "Creating Windows Event Source..."
+
+    New-EventLog `
+        -LogName $EventLog `
+        -Source $EventSource
+
+    Write-Host "Event Source created."
+}
+else
+{
+    Write-Host "Event Source already exists."
+}
+
+# Create Desktop Shortcut
+
+Write-Host "Creating Desktop Shortcut..."
+
+$Shell = New-Object -ComObject WScript.Shell
+
+$Shortcut = $Shell.CreateShortcut(
+    "C:\Users\Public\Desktop\Maintenance Logger.lnk"
 )
 
-# ── AD Auth Helper ────────────────────────────────────────────────────────────
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class LogonUtil {
-    [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
-    public static extern bool LogonUser(
-        string lpszUsername, string lpszDomain, string lpszPassword,
-        int dwLogonType, int dwLogonProvider, out IntPtr phToken);
-    [DllImport("kernel32.dll", SetLastError=true)]
-    public static extern bool CloseHandle(IntPtr hObject);
-}
-"@
+$Shortcut.TargetPath = "powershell.exe"
 
-$LoggedInUser = "$env:USERDOMAIN\$env:USERNAME"
-$Computer     = $env:COMPUTERNAME
+$Shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$InstallFolder\$ScriptName`""
 
-# ── Windows Forms GUI ─────────────────────────────────────────────────────────
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-[System.Windows.Forms.Application]::EnableVisualStyles()
+$Shortcut.WorkingDirectory = $InstallFolder
 
-$form                  = New-Object System.Windows.Forms.Form
-$form.Text             = "Maintenance Logger"
-$form.Size             = New-Object System.Drawing.Size(520, 560)
-$form.StartPosition    = "CenterScreen"
-$form.FormBorderStyle  = "FixedDialog"
-$form.MaximizeBox      = $false
-$form.BackColor        = [System.Drawing.Color]::FromArgb(245, 245, 247)
-$form.Font             = New-Object System.Drawing.Font("Segoe UI", 9)
-
-# ── Helper: label + control row ───────────────────────────────────────────────
-function Add-Row {
-    param($form, $labelText, $control, $y)
-    $lbl           = New-Object System.Windows.Forms.Label
-    $lbl.Text      = $labelText
-    $lbl.Location  = New-Object System.Drawing.Point(30, $y)
-    $lbl.Size      = New-Object System.Drawing.Size(140, 20)
-    $lbl.ForeColor = [System.Drawing.Color]::FromArgb(80, 80, 80)
-    $lbl.Font      = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-    $control.Location = New-Object System.Drawing.Point(30, ($y + 22))
-    $control.Size     = New-Object System.Drawing.Size(440, 28)
-    $form.Controls.Add($lbl)
-    $form.Controls.Add($control)
+if (Test-Path "$InstallFolder\$IconName")
+{
+    $Shortcut.IconLocation = "$InstallFolder\$IconName"
 }
 
-# ── Title bar panel ───────────────────────────────────────────────────────────
-$titlePanel            = New-Object System.Windows.Forms.Panel
-$titlePanel.Dock       = "Top"
-$titlePanel.Height     = 60
-$titlePanel.BackColor  = [System.Drawing.Color]::FromArgb(30, 30, 30)
+$Shortcut.Save()
 
-$titleLabel            = New-Object System.Windows.Forms.Label
-$titleLabel.Text       = "  🔧  Maintenance Logger"
-$titleLabel.Dock       = "Fill"
-$titleLabel.ForeColor  = [System.Drawing.Color]::White
-$titleLabel.Font       = New-Object System.Drawing.Font("Segoe UI", 14, [System.Drawing.FontStyle]::Bold)
-$titleLabel.TextAlign  = "MiddleLeft"
-$titlePanel.Controls.Add($titleLabel)
-$form.Controls.Add($titlePanel)
+Write-Host "Desktop shortcut created."
 
-# ── Performed By ──────────────────────────────────────────────────────────────
-$txtPerformedBy        = New-Object System.Windows.Forms.TextBox
-$txtPerformedBy.Text   = $LoggedInUser
-Add-Row $form "Performed By (DOMAIN\Username)" $txtPerformedBy 80
+Write-Host ""
+Write-Host "======================================="
+Write-Host " Installation Complete"
+Write-Host "======================================="
+Write-Host ""
 
-# ── Password (shown only when Performed By differs from logged-in user) ───────
-$lblPassword           = New-Object System.Windows.Forms.Label
-$lblPassword.Text      = "Password (required if different user)"
-$lblPassword.Location  = New-Object System.Drawing.Point(30, 152)
-$lblPassword.Size      = New-Object System.Drawing.Size(300, 20)
-$lblPassword.ForeColor = [System.Drawing.Color]::FromArgb(80, 80, 80)
-$lblPassword.Font      = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+Write-Host "Installed to:"
+Write-Host "  $InstallFolder"
 
-$txtPassword           = New-Object System.Windows.Forms.TextBox
-$txtPassword.Location  = New-Object System.Drawing.Point(30, 174)
-$txtPassword.Size      = New-Object System.Drawing.Size(440, 28)
-$txtPassword.PasswordChar = '*'
-$txtPassword.Enabled   = $false
+Write-Host ""
+Write-Host "Desktop Shortcut:"
+Write-Host "  C:\Users\Public\Desktop\Maintenance Logger.lnk"
 
-$form.Controls.Add($lblPassword)
-$form.Controls.Add($txtPassword)
+Write-Host ""
+Write-Host "Event Source:"
+Write-Host "  MaintenanceLogger"
 
-# Enable/disable password field based on whether user changed the name
-$txtPerformedBy.Add_TextChanged({
-    $txtPassword.Enabled = ($txtPerformedBy.Text.Trim() -ne $LoggedInUser)
-})
-
-# ── Event Date & Time ─────────────────────────────────────────────────────────
-$lblDateTime           = New-Object System.Windows.Forms.Label
-$lblDateTime.Text      = "Event Date & Time"
-$lblDateTime.Location  = New-Object System.Drawing.Point(30, 218)
-$lblDateTime.Size      = New-Object System.Drawing.Size(200, 20)
-$lblDateTime.ForeColor = [System.Drawing.Color]::FromArgb(80, 80, 80)
-$lblDateTime.Font      = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-
-$dtPicker              = New-Object System.Windows.Forms.DateTimePicker
-$dtPicker.Location     = New-Object System.Drawing.Point(30, 240)
-$dtPicker.Size         = New-Object System.Drawing.Size(440, 28)
-$dtPicker.Format       = "Custom"
-$dtPicker.CustomFormat = "yyyy-MM-dd  hh:mm tt"
-$dtPicker.ShowUpDown   = $true
-$dtPicker.Value        = Get-Date
-
-$form.Controls.Add($lblDateTime)
-$form.Controls.Add($dtPicker)
-
-# ── Category ──────────────────────────────────────────────────────────────────
-$cboCategory           = New-Object System.Windows.Forms.ComboBox
-$cboCategory.DropDownStyle = "DropDownList"
-$Categories | ForEach-Object { $cboCategory.Items.Add($_) | Out-Null }
-$cboCategory.SelectedIndex = 0
-Add-Row $form "Category" $cboCategory 290
-
-# ── Description ───────────────────────────────────────────────────────────────
-$lblDesc               = New-Object System.Windows.Forms.Label
-$lblDesc.Text          = "Description"
-$lblDesc.Location      = New-Object System.Drawing.Point(30, 362)
-$lblDesc.Size          = New-Object System.Drawing.Size(200, 20)
-$lblDesc.ForeColor     = [System.Drawing.Color]::FromArgb(80, 80, 80)
-$lblDesc.Font          = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-
-$txtDesc               = New-Object System.Windows.Forms.TextBox
-$txtDesc.Location      = New-Object System.Drawing.Point(30, 384)
-$txtDesc.Size          = New-Object System.Drawing.Size(440, 80)
-$txtDesc.Multiline     = $true
-$txtDesc.ScrollBars    = "Vertical"
-
-$form.Controls.Add($lblDesc)
-$form.Controls.Add($txtDesc)
-
-# ── Status label ──────────────────────────────────────────────────────────────
-$lblStatus             = New-Object System.Windows.Forms.Label
-$lblStatus.Location    = New-Object System.Drawing.Point(30, 478)
-$lblStatus.Size        = New-Object System.Drawing.Size(340, 20)
-$lblStatus.ForeColor   = [System.Drawing.Color]::FromArgb(120, 120, 120)
-$form.Controls.Add($lblStatus)
-
-# ── Submit Button ─────────────────────────────────────────────────────────────
-$btnSubmit             = New-Object System.Windows.Forms.Button
-$btnSubmit.Text        = "Log Entry"
-$btnSubmit.Location    = New-Object System.Drawing.Point(360, 472)
-$btnSubmit.Size        = New-Object System.Drawing.Size(110, 34)
-$btnSubmit.BackColor   = [System.Drawing.Color]::FromArgb(30, 30, 30)
-$btnSubmit.ForeColor   = [System.Drawing.Color]::White
-$btnSubmit.FlatStyle   = "Flat"
-$btnSubmit.Font        = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-$btnSubmit.Cursor      = [System.Windows.Forms.Cursors]::Hand
-
-$btnSubmit.Add_Click({
-    $lblStatus.ForeColor = [System.Drawing.Color]::FromArgb(120, 120, 120)
-    $lblStatus.Text = ""
-
-    $performedByRaw = $txtPerformedBy.Text.Trim()
-    $description    = $txtDesc.Text.Trim()
-
-    #
+Write-Host ""
+Pause
