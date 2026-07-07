@@ -6,14 +6,25 @@ $EventLogName = "Application"
 $EventSource  = "MaintenanceLogger"
 
 $Categories = @(
-    "Data Transfer",
+    "Data Transfer (low to high)",
+    "Data Transfer (high to high)",
+    "Data Transfer (high to low)",
     "User Account Creation",
     "User Account Modification",
+    "Service Account Creation",
+    "Service Account Modification",
     "New VM",
     "Hardware Install",
+    "Hardware Move",
+    "Hardware Removed",
+    "Hardware Sanitization",
     "Software Install",
+    "Software Uninstall",
     "Patching",
+    "AV Definition Update",
     "System Reboot",
+    "Admin/Root Login (name account in description)",
+    "Group Account Login (name account in description)",
     "Other"
 )
 
